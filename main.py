@@ -20,6 +20,10 @@ app.add_middleware(
 
 models.Base.metadata.create_all(bind=models.engine)
 
+@app.get("/")
+def read_root():
+    return {"Hello": "World"}
+
 
 @app.get('/events')
 async def get_events():
@@ -68,6 +72,8 @@ async def update_item(item_id: int, event: EventUpdate):
     db.commit()
 
     return "Запись отредактирована"
+
+'3.121.29.84'
 
 
 @app.delete('/events/{item_id}')
