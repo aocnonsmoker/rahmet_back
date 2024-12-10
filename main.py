@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.params import Body
 from fastapi.middleware.cors import CORSMiddleware
-from models import Events
+from models import Events, Car
 import models
 from pydantic import BaseModel
 from models import SessionLocal
@@ -29,6 +29,7 @@ def read_root():
 async def get_events():
     db = SessionLocal()
     item = db.query(Events).all()
+    db.close()
     return item
 
 
@@ -41,6 +42,7 @@ def record(event: dict = Body(...)):
     db.add(db_item)
     db.commit()
     db.refresh(db_item)
+    db.close()
     return 'Запись добавлена'
 
 
@@ -70,6 +72,7 @@ async def update_item(item_id: int, event: EventUpdate):
     db_item.end = event.end
     db_item.split = event.split
     db.commit()
+    db.close()
 
     return "Запись отредактирована"
 
@@ -82,4 +85,58 @@ async def delete_item(item_id: int):
     db_item = db.query(Events).filter(Events.id == item_id).first()
     db.delete(db_item)
     db.commit()
+    db.close()
+    return "Запись удалена"
+
+
+
+@app.get('/car')
+async def get_car():
+    db = SessionLocal()
+    item = db.query(Car).all()
+    db.close()
+    return item
+
+
+@app.post('/record-car')
+def record(car: dict = Body(...)):
+    db = SessionLocal()
+    db_item = Car(title=car['title'], price=car['price'], start=car['start'])
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    db.close()
+    return 'Запись добавлена'
+
+
+class CarUpdate(BaseModel):
+    title: str
+    price: Optional[int] = None
+    start: str
+
+
+@app.put('/car/{item_id}')
+async def update_item(item_id: int, car: CarUpdate):
+    db = SessionLocal()
+    db_item = db.query(Car).filter(Car.id == item_id).first()
+
+    if db_item is None:
+        return {"error": "Event not found"}
+
+    db_item.title = car.title
+    db_item.price = car.price
+    db_item.start = car.start
+    db.commit()
+    db.close()
+
+    return "Запись отредактирована"
+
+
+@app.delete('/car/{item_id}')
+async def delete_item(item_id: int):
+    db = SessionLocal()
+    db_item = db.query(Car).filter(Car.id == item_id).first()
+    db.delete(db_item)
+    db.commit()
+    db.close()
     return "Запись удалена"

@@ -29,3 +29,12 @@ class Events(Base):
     start = Column(DateTime, index=True)
     end = Column(DateTime, index=True)
     duration = Column(Float, nullable=False)
+
+
+class Car(Base):
+    __tablename__ = "car"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    title = Column(String, nullable=False)
+    price = Column(Integer, nullable=True)
+    start = Column(DateTime, index=True)
