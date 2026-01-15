@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.params import Body
 from fastapi.middleware.cors import CORSMiddleware
-from models import Events, Car
+from models import Events, Car, PS
 import models
 from pydantic import BaseModel
 from models import SessionLocal
@@ -136,6 +136,58 @@ async def update_item(item_id: int, car: CarUpdate):
 async def delete_item(item_id: int):
     db = SessionLocal()
     db_item = db.query(Car).filter(Car.id == item_id).first()
+    db.delete(db_item)
+    db.commit()
+    db.close()
+    return "Запись удалена"
+
+
+@app.get('/ps')
+async def get_ps():
+    db = SessionLocal()
+    item = db.query(PS).all()
+    db.close()
+    return item
+
+
+@app.post('/record-ps')
+def record(ps: dict = Body(...)):
+    db = SessionLocal()
+    db_item = PS(title=ps['title'], price=ps['price'], start=ps['start'])
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    db.close()
+    return 'Запись добавлена'
+
+
+class PSUpdate(BaseModel):
+    title: str
+    price: Optional[int] = None
+    start: str
+
+
+@app.put('/ps/{item_id}')
+async def update_item(item_id: int, ps: PSUpdate):
+    db = SessionLocal()
+    db_item = db.query(PS).filter(PS.id == item_id).first()
+
+    if db_item is None:
+        return {"error": "Event not found"}
+
+    db_item.title = ps.title
+    db_item.price = ps.price
+    db_item.start = ps.start
+    db.commit()
+    db.close()
+
+    return "Запись отредактирована"
+
+
+@app.delete('/ps/{item_id}')
+async def delete_item(item_id: int):
+    db = SessionLocal()
+    db_item = db.query(PS).filter(PS.id == item_id).first()
     db.delete(db_item)
     db.commit()
     db.close()

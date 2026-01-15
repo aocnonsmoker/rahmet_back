@@ -38,3 +38,11 @@ class Car(Base):
     title = Column(String, nullable=False)
     price = Column(Integer, nullable=True)
     start = Column(DateTime, index=True)
+
+class PS(Base):
+    __tablename__ = "ps"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    title = Column(String, nullable=False)
+    price = Column(Integer, nullable=True)
+    start = Column(DateTime, index=True)
