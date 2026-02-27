@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.params import Body
 from fastapi.middleware.cors import CORSMiddleware
-from models import Events, Car, PS
+from models import Events, Car, PS, Hotel
 import models
 from pydantic import BaseModel
 from models import SessionLocal
@@ -75,8 +75,6 @@ async def update_item(item_id: int, event: EventUpdate):
     db.close()
 
     return "Запись отредактирована"
-
-'3.121.29.84'
 
 
 @app.delete('/events/{item_id}')
@@ -188,6 +186,63 @@ async def update_item(item_id: int, ps: PSUpdate):
 async def delete_item(item_id: int):
     db = SessionLocal()
     db_item = db.query(PS).filter(PS.id == item_id).first()
+    db.delete(db_item)
+    db.commit()
+    db.close()
+    return "Запись удалена"
+
+
+@app.get('/hotel')
+async def get_hotel():
+    db = SessionLocal()
+    item = db.query(Hotel).all()
+    db.close()
+    return item
+
+
+@app.post('/record-hotel')
+def record_hotel(hotel: dict = Body(...)):
+    db = SessionLocal()
+    db_item = Hotel(title=hotel['title'], split=hotel['split'], price=hotel['price'],
+                    start=hotel['start'], end=hotel['end'])
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    db.close()
+    return 'Запись добавлена'
+
+
+class HotelUpdate(BaseModel):
+    title: str
+    price: Optional[int] = None
+    start: str
+    end: str
+    split: int
+
+
+@app.put('/hotel/{item_id}')
+async def update_hotel(item_id: int, hotel: HotelUpdate):
+    db = SessionLocal()
+    db_item = db.query(Hotel).filter(Hotel.id == item_id).first()
+
+    if db_item is None:
+        return {"error": "Hotel not found"}
+
+    db_item.title = hotel.title
+    db_item.price = hotel.price
+    db_item.start = hotel.start
+    db_item.end = hotel.end
+    db_item.split = hotel.split
+    db.commit()
+    db.close()
+
+    return "Запись отредактирована"
+
+
+@app.delete('/hotel/{item_id}')
+async def delete_hotel(item_id: int):
+    db = SessionLocal()
+    db_item = db.query(Hotel).filter(Hotel.id == item_id).first()
     db.delete(db_item)
     db.commit()
     db.close()

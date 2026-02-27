@@ -46,3 +46,13 @@ class PS(Base):
     title = Column(String, nullable=False)
     price = Column(Integer, nullable=True)
     start = Column(DateTime, index=True)
+
+class Hotel(Base):
+    __tablename__ = "hotel"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    title = Column(String, nullable=False)
+    split = Column(Integer, nullable=False)
+    price = Column(Integer, nullable=True)
+    start = Column(DateTime, index=True)
+    end = Column(DateTime, index=True)
