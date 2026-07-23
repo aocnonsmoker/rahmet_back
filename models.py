@@ -90,6 +90,7 @@ class Section(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     sort_order = Column(Integer, nullable=False, default=0)
     slot_step_minutes = Column(Integer, nullable=False, default=30)  # time_slot template only
+    guest_fields = Column(String, nullable=False, default="none")  # "none" | "single" | "split" — time_slot template only
 
 
 class Record(Base):

@@ -351,6 +351,7 @@ def delete_resource(item_id: int, current_user: User = Depends(require_owner)):
 # ============================== Sections (разделы бизнеса) ==============================
 
 VALID_SLOT_STEPS = {15, 30, 60}
+VALID_GUEST_FIELDS = {"none", "single", "split"}
 
 
 class SectionCreate(BaseModel):
@@ -358,6 +359,7 @@ class SectionCreate(BaseModel):
     icon: str
     template: str  # "time_slot" | "date_range" | "queue"
     slot_step_minutes: int = 30
+    guest_fields: str = "none"
 
 
 class SectionUpdate(BaseModel):
@@ -366,6 +368,7 @@ class SectionUpdate(BaseModel):
     enabled: Optional[bool] = None
     sort_order: Optional[int] = None
     slot_step_minutes: Optional[int] = None
+    guest_fields: Optional[str] = None
 
 
 class SectionOut(BaseModel):
@@ -379,6 +382,7 @@ class SectionOut(BaseModel):
     enabled: bool
     sort_order: int
     slot_step_minutes: int
+    guest_fields: str
 
 
 @app.get("/sections", response_model=List[SectionOut])
@@ -400,6 +404,8 @@ def create_section(data: SectionCreate, current_user: User = Depends(require_own
         raise HTTPException(status_code=400, detail="Неизвестный шаблон раздела")
     if data.slot_step_minutes not in VALID_SLOT_STEPS:
         raise HTTPException(status_code=400, detail="Недопустимый шаг времени")
+    if data.guest_fields not in VALID_GUEST_FIELDS:
+        raise HTTPException(status_code=400, detail="Недопустимый режим учёта людей")
     db = SessionLocal()
     key = unique_section_key(db, current_user.tenant_id, data.label)
     max_order = (
@@ -414,6 +420,7 @@ def create_section(data: SectionCreate, current_user: User = Depends(require_own
         enabled=True,
         sort_order=max_order + 1,
         slot_step_minutes=data.slot_step_minutes,
+        guest_fields=data.guest_fields,
     )
     db.add(item)
     db.commit()
@@ -442,6 +449,11 @@ def update_section(section_id: int, data: SectionUpdate, current_user: User = De
             db.close()
             raise HTTPException(status_code=400, detail="Недопустимый шаг времени")
         item.slot_step_minutes = data.slot_step_minutes
+    if data.guest_fields is not None:
+        if data.guest_fields not in VALID_GUEST_FIELDS:
+            db.close()
+            raise HTTPException(status_code=400, detail="Недопустимый режим учёта людей")
+        item.guest_fields = data.guest_fields
     db.commit()
     db.refresh(item)
     db.close()
@@ -466,16 +478,25 @@ def delete_section(section_id: int, current_user: User = Depends(require_owner))
         db.close()
         raise HTTPException(status_code=400, detail="Сначала удалите номера/боксы этого раздела")
 
-    has_records = (
+    # Records referencing an already-deactivated resource are invisible in
+    # every UI (resource lists filter is_active=True) — there is no way for
+    # an owner to find and delete them by hand, so they'd block section
+    # deletion forever. has_resources above already guarantees no *active*
+    # resource remains, so any record with a resource_id here can only point
+    # at an inactive one — safe to clean up together with the section.
+    # Records with no resource_id (queue template) are real reachable
+    # history and still block deletion.
+    blocking_record = (
         db.query(Record)
         .filter(Record.tenant_id == current_user.tenant_id, Record.section == item.key)
+        .filter(Record.resource_id.is_(None))
         .first()
-        is not None
     )
-    if has_records:
+    if blocking_record is not None:
         db.close()
         raise HTTPException(status_code=400, detail="Сначала удалите записи этого раздела")
 
+    db.query(Record).filter(Record.tenant_id == current_user.tenant_id, Record.section == item.key).delete()
     db.delete(item)
     db.commit()
     db.close()
