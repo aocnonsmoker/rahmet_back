@@ -65,6 +65,17 @@ class UserSection(Base):
     section = Column(String, nullable=False)  # "spa" | "car" | "hotel" | "ps"
 
 
+class Trainer(Base):
+    __tablename__ = "trainers"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    section = Column(String, nullable=False)  # club-template section key
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class Resource(Base):
     __tablename__ = "resources"
 
@@ -75,6 +86,7 @@ class Resource(Base):
     color = Column(String, nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
+    trainer_id = Column(Integer, ForeignKey("trainers.id"), nullable=True)  # club template only
 
 
 class Section(Base):
@@ -106,3 +118,65 @@ class Record(Base):
     end = Column(DateTime, index=True, nullable=True)
     adult = Column(Integer, nullable=True)
     child = Column(Integer, nullable=True)
+
+
+class Client(Base):
+    __tablename__ = "clients"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=False)
+    age = Column(Integer, nullable=True)
+    parent_name = Column(String, nullable=True)  # guardian name, for minor clients
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    section = Column(String, nullable=False)  # club-template section key
+    payment_date = Column(DateTime, nullable=True)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    price = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="active")  # "active" | "expired" | "frozen"
+
+
+class MembershipResource(Base):
+    __tablename__ = "membership_resources"
+    __table_args__ = (UniqueConstraint("membership_id", "resource_id", name="uq_membership_resources"),)
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    membership_id = Column(Integer, ForeignKey("memberships.id"), nullable=False, index=True)
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False, index=True)  # group
+
+
+class Attendance(Base):
+    __tablename__ = "attendance"
+    __table_args__ = (UniqueConstraint("membership_id", "date", name="uq_attendance_membership_date"),)
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    membership_id = Column(Integer, ForeignKey("memberships.id"), nullable=False, index=True)
+    date = Column(DateTime, nullable=False, index=True)
+    status = Column(String, nullable=False)  # "present" | "absent"
+
+
+class TrialLesson(Base):
+    __tablename__ = "trial_lessons"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=False)
+    age = Column(Integer, nullable=True)
+    section = Column(String, nullable=False)
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)  # group, if known yet
+    scheduled_at = Column(DateTime, nullable=False)
+    status = Column(String, nullable=False, default="scheduled")
+    # "scheduled" | "came" | "no_show" | "bought" | "thinking" | "declined"
+    created_at = Column(DateTime, server_default=func.now())
