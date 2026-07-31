@@ -86,7 +86,15 @@ class Resource(Base):
     color = Column(String, nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
-    trainer_id = Column(Integer, ForeignKey("trainers.id"), nullable=True)  # club template only
+
+
+class TrainerResource(Base):
+    __tablename__ = "trainer_resources"
+    __table_args__ = (UniqueConstraint("trainer_id", "resource_id", name="uq_trainer_resources"),)
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    trainer_id = Column(Integer, ForeignKey("trainers.id"), nullable=False, index=True)
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False, index=True)  # group
 
 
 class Section(Base):

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -28,6 +28,7 @@ from models import (
     Subscription,
     Tenant,
     Trainer,
+    TrainerResource,
     TrialLesson,
     User,
     UserSection,
@@ -279,22 +280,44 @@ class TrainerCreate(BaseModel):
     section: str
     full_name: str
     phone: Optional[str] = None
+    resource_ids: List[int] = []
 
 
 class TrainerUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     is_active: Optional[bool] = None
+    resource_ids: Optional[List[int]] = None
 
 
 class TrainerOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     section: str
     full_name: str
     phone: Optional[str] = None
     is_active: bool
+    resource_ids: List[int]
+
+
+def trainer_out(t: Trainer, resource_ids: List[int]) -> dict:
+    return {
+        "id": t.id,
+        "section": t.section,
+        "full_name": t.full_name,
+        "phone": t.phone,
+        "is_active": t.is_active,
+        "resource_ids": resource_ids,
+    }
+
+
+def get_trainer_resource_ids(db, trainer_ids: List[int]) -> dict:
+    result = {tid: [] for tid in trainer_ids}
+    if not trainer_ids:
+        return result
+    rows = db.query(TrainerResource).filter(TrainerResource.trainer_id.in_(trainer_ids)).all()
+    for row in rows:
+        result[row.trainer_id].append(row.resource_id)
+    return result
 
 
 @app.get("/trainers", response_model=List[TrainerOut])
@@ -304,8 +327,10 @@ def list_trainers(section: Optional[str] = None, current_user: User = Depends(re
     if section:
         query = query.filter(Trainer.section == section)
     items = query.all()
+    resource_map = get_trainer_resource_ids(db, [t.id for t in items])
+    result = [trainer_out(t, resource_map[t.id]) for t in items]
     db.close()
-    return items
+    return result
 
 
 @app.post("/trainers", response_model=TrainerOut)
@@ -319,10 +344,14 @@ def create_trainer(data: TrainerCreate, current_user: User = Depends(require_own
         is_active=True,
     )
     db.add(item)
+    db.flush()
+    for resource_id in data.resource_ids:
+        db.add(TrainerResource(trainer_id=item.id, resource_id=resource_id))
     db.commit()
     db.refresh(item)
+    result = trainer_out(item, data.resource_ids)
     db.close()
-    return item
+    return result
 
 
 @app.put("/trainers/{item_id}", response_model=TrainerOut)
@@ -338,10 +367,16 @@ def update_trainer(item_id: int, data: TrainerUpdate, current_user: User = Depen
         item.phone = data.phone
     if data.is_active is not None:
         item.is_active = data.is_active
+    if data.resource_ids is not None:
+        db.query(TrainerResource).filter(TrainerResource.trainer_id == item.id).delete()
+        for resource_id in data.resource_ids:
+            db.add(TrainerResource(trainer_id=item.id, resource_id=resource_id))
     db.commit()
     db.refresh(item)
+    resource_ids = get_trainer_resource_ids(db, [item.id])[item.id]
+    result = trainer_out(item, resource_ids)
     db.close()
-    return item
+    return result
 
 
 @app.delete("/trainers/{item_id}")
@@ -351,7 +386,7 @@ def delete_trainer(item_id: int, current_user: User = Depends(require_owner)):
     if item is None:
         db.close()
         raise HTTPException(status_code=404, detail="Не найдено")
-    # Soft delete — groups may still reference this id via trainer_id.
+    # Soft delete — groups may still reference this trainer via trainer_resources.
     item.is_active = False
     db.commit()
     db.close()
@@ -363,7 +398,6 @@ class ResourceCreate(BaseModel):
     label: str
     color: str
     sort_order: int = 0
-    trainer_id: Optional[int] = None
 
 
 class ResourceUpdate(BaseModel):
@@ -371,7 +405,6 @@ class ResourceUpdate(BaseModel):
     color: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
-    trainer_id: Optional[int] = None
 
 
 class ResourceOut(BaseModel):
@@ -383,7 +416,6 @@ class ResourceOut(BaseModel):
     color: str
     sort_order: int
     is_active: bool
-    trainer_id: Optional[int] = None
 
 
 @app.get("/resources", response_model=List[ResourceOut])
@@ -406,7 +438,6 @@ def create_resource(data: ResourceCreate, current_user: User = Depends(require_o
         label=data.label,
         color=data.color,
         sort_order=data.sort_order,
-        trainer_id=data.trainer_id,
         is_active=True,
     )
     db.add(item)
@@ -431,8 +462,6 @@ def update_resource(item_id: int, data: ResourceUpdate, current_user: User = Dep
         item.sort_order = data.sort_order
     if data.is_active is not None:
         item.is_active = data.is_active
-    if data.trainer_id is not None:
-        item.trainer_id = data.trainer_id
     db.commit()
     db.refresh(item)
     db.close()
@@ -946,15 +975,15 @@ def delete_membership(item_id: int, section: str, current_user: User = Depends(r
 def list_attendance(
     section: str,
     resource_id: int,
-    month: str,
+    start_date: str,
+    end_date: str,
     current_user: User = Depends(require_active_subscription),
 ):
     try:
-        month_start = datetime.strptime(month, "%Y-%m")
+        range_start = datetime.strptime(start_date, "%Y-%m-%d")
+        range_end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Неверный формат месяца, ожидается YYYY-MM")
-    month_end = datetime(month_start.year + (1 if month_start.month == 12 else 0),
-                          1 if month_start.month == 12 else month_start.month + 1, 1)
+        raise HTTPException(status_code=400, detail="Неверный формат даты, ожидается YYYY-MM-DD")
 
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=False)
@@ -977,8 +1006,8 @@ def list_attendance(
         .filter(
             Attendance.tenant_id == current_user.tenant_id,
             Attendance.membership_id.in_(membership_ids),
-            Attendance.date >= month_start,
-            Attendance.date < month_end,
+            Attendance.date >= range_start,
+            Attendance.date < range_end,
         )
         .all()
         if membership_ids
@@ -1036,6 +1065,35 @@ def mark_attendance(section: str, data: AttendanceMark, current_user: User = Dep
     db.refresh(existing)
     db.close()
     return existing
+
+
+@app.delete("/attendance")
+def unmark_attendance(
+    section: str, membership_id: int, date: str, current_user: User = Depends(require_active_subscription)
+):
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=True)
+    membership = (
+        db.query(Membership)
+        .filter(
+            Membership.id == membership_id,
+            Membership.tenant_id == current_user.tenant_id,
+            Membership.section == section,
+        )
+        .first()
+    )
+    if membership is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Абонемент не найден")
+    try:
+        mark_date = datetime.fromisoformat(date)
+    except ValueError:
+        db.close()
+        raise HTTPException(status_code=400, detail="Неверный формат даты")
+    db.query(Attendance).filter(Attendance.membership_id == membership_id, Attendance.date == mark_date).delete()
+    db.commit()
+    db.close()
+    return "Отметка снята"
 
 
 class TrialLessonCreate(BaseModel):
