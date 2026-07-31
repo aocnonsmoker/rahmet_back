@@ -14,6 +14,7 @@ from auth import (
     hash_password,
     require_active_subscription,
     require_owner,
+    require_superadmin,
     verify_password,
 )
 from models import (
@@ -160,6 +161,169 @@ def me(current_user: User = Depends(get_current_user)):
         tenant_name=tenant.name,
         subscription_status=subscription.status if subscription else "expired",
     )
+
+
+# ============================== Platform admin (superadmin-only) ==============================
+
+VALID_SUBSCRIPTION_STATUSES = {"trial", "active", "expired"}
+
+
+class AdminTenantOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+    subscription_status: str
+    subscription_expires_at: Optional[datetime] = None
+    subscription_notes: Optional[str] = None
+    owner_username: Optional[str] = None
+
+
+class AdminTenantCreate(BaseModel):
+    name: str
+    slug: str
+    owner_username: str
+    owner_password: str
+    subscription_status: str = "trial"
+    subscription_expires_at: str
+
+
+class AdminSubscriptionUpdate(BaseModel):
+    status: str
+    expires_at: str
+    notes: Optional[str] = None
+
+
+class AdminUserOut(BaseModel):
+    id: int
+    username: str
+    role: str
+    is_active: bool
+
+
+class AdminPasswordUpdate(BaseModel):
+    password: str
+
+
+def admin_tenant_out(db, tenant: Tenant) -> AdminTenantOut:
+    sub = db.query(Subscription).filter(Subscription.tenant_id == tenant.id).first()
+    owner = (
+        db.query(User)
+        .filter(User.tenant_id == tenant.id, User.role == "owner")
+        .order_by(User.id)
+        .first()
+    )
+    return AdminTenantOut(
+        id=tenant.id,
+        name=tenant.name,
+        slug=tenant.slug,
+        subscription_status=sub.status if sub else "expired",
+        subscription_expires_at=sub.expires_at if sub else None,
+        subscription_notes=sub.notes if sub else None,
+        owner_username=owner.username if owner else None,
+    )
+
+
+@app.get("/admin/tenants", response_model=List[AdminTenantOut])
+def admin_list_tenants(current_user: User = Depends(require_superadmin)):
+    db = SessionLocal()
+    tenants = db.query(Tenant).filter(Tenant.slug != "jmb").order_by(Tenant.id).all()
+    result = [admin_tenant_out(db, t) for t in tenants]
+    db.close()
+    return result
+
+
+@app.post("/admin/tenants", response_model=AdminTenantOut)
+def admin_create_tenant(data: AdminTenantCreate, current_user: User = Depends(require_superadmin)):
+    if data.subscription_status not in VALID_SUBSCRIPTION_STATUSES:
+        raise HTTPException(status_code=400, detail="Недопустимый статус подписки")
+    db = SessionLocal()
+    existing = db.query(Tenant).filter(Tenant.slug == data.slug).first()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=400, detail="Такой код компании уже занят")
+    try:
+        expires_at = datetime.fromisoformat(data.subscription_expires_at)
+    except ValueError:
+        db.close()
+        raise HTTPException(status_code=400, detail="Неверный формат даты окончания подписки")
+
+    tenant = Tenant(name=data.name.strip(), slug=data.slug.strip())
+    db.add(tenant)
+    db.flush()
+    db.add(Subscription(tenant_id=tenant.id, status=data.subscription_status, expires_at=expires_at))
+    db.add(
+        User(
+            tenant_id=tenant.id,
+            username=data.owner_username.strip(),
+            password_hash=hash_password(data.owner_password),
+            role="owner",
+            is_active=True,
+            read_only=False,
+        )
+    )
+    db.commit()
+    result = admin_tenant_out(db, tenant)
+    db.close()
+    return result
+
+
+@app.put("/admin/tenants/{tenant_id}/subscription", response_model=AdminTenantOut)
+def admin_update_subscription(
+    tenant_id: int, data: AdminSubscriptionUpdate, current_user: User = Depends(require_superadmin)
+):
+    if data.status not in VALID_SUBSCRIPTION_STATUSES:
+        raise HTTPException(status_code=400, detail="Недопустимый статус подписки")
+    db = SessionLocal()
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    try:
+        expires_at = datetime.fromisoformat(data.expires_at)
+    except ValueError:
+        db.close()
+        raise HTTPException(status_code=400, detail="Неверный формат даты окончания подписки")
+
+    sub = db.query(Subscription).filter(Subscription.tenant_id == tenant_id).first()
+    if sub is None:
+        sub = Subscription(tenant_id=tenant_id, status=data.status, expires_at=expires_at, notes=data.notes)
+        db.add(sub)
+    else:
+        sub.status = data.status
+        sub.expires_at = expires_at
+        sub.notes = data.notes
+    db.commit()
+    result = admin_tenant_out(db, tenant)
+    db.close()
+    return result
+
+
+@app.get("/admin/tenants/{tenant_id}/users", response_model=List[AdminUserOut])
+def admin_list_tenant_users(tenant_id: int, current_user: User = Depends(require_superadmin)):
+    db = SessionLocal()
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    users = db.query(User).filter(User.tenant_id == tenant_id).order_by(User.id).all()
+    result = [AdminUserOut(id=u.id, username=u.username, role=u.role, is_active=u.is_active) for u in users]
+    db.close()
+    return result
+
+
+@app.put("/admin/users/{user_id}/password")
+def admin_reset_password(user_id: int, data: AdminPasswordUpdate, current_user: User = Depends(require_superadmin)):
+    if not data.password:
+        raise HTTPException(status_code=400, detail="Введите новый пароль")
+    db = SessionLocal()
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    user.password_hash = hash_password(data.password)
+    db.commit()
+    db.close()
+    return "Пароль обновлён"
 
 
 # ============================== Employees (owner-only) ==============================

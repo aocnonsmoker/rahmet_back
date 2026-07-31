@@ -77,6 +77,14 @@ def require_owner(user: User = Depends(require_active_subscription)) -> User:
     return user
 
 
+def require_superadmin(user: User = Depends(get_current_user)) -> User:
+    # Platform-level access, deliberately independent of require_active_subscription —
+    # the admin's own tenant is a service account, not a paying customer.
+    if user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Доступно только администратору платформы")
+    return user
+
+
 def require_section(section: str, write: bool = False):
     """Owner always passes; an employee must have this section assigned.
     When write=True, a read_only employee is rejected even if the section matches
