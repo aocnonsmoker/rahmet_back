@@ -117,7 +117,10 @@ class MeResponse(BaseModel):
 @app.post("/auth/login", response_model=LoginResponse)
 def login(data: LoginRequest):
     db = SessionLocal()
-    tenant = db.query(Tenant).filter(Tenant.slug == data.tenant_slug).first()
+    # Код компании и логин не обязаны совпадать по регистру — сравниваем в нижнем
+    # регистре, чтобы "Urban-sport"/"Raushan" находили tenant/user так же, как
+    # "urban-sport"/"raushan".
+    tenant = db.query(Tenant).filter(func.lower(Tenant.slug) == data.tenant_slug.strip().lower()).first()
     invalid = HTTPException(status_code=401, detail="Неверный код компании, логин или пароль")
     if tenant is None:
         db.close()
@@ -125,7 +128,11 @@ def login(data: LoginRequest):
 
     user = (
         db.query(User)
-        .filter(User.tenant_id == tenant.id, User.username == data.username, User.is_active == True)
+        .filter(
+            User.tenant_id == tenant.id,
+            func.lower(User.username) == data.username.strip().lower(),
+            User.is_active == True,
+        )
         .first()
     )
     if user is None or not verify_password(data.password, user.password_hash):
