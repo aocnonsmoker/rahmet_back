@@ -20,6 +20,7 @@ from auth import (
 from models import (
     Attendance,
     Client,
+    GroupSchedule,
     Membership,
     MembershipResource,
     Record,
@@ -564,11 +565,15 @@ def delete_trainer(item_id: int, current_user: User = Depends(require_owner)):
     return "Удалено"
 
 
+VALID_RESOURCE_KINDS = {"group", "room"}
+
+
 class ResourceCreate(BaseModel):
     section: str
     label: str
     color: str
     sort_order: int = 0
+    kind: str = "group"
 
 
 class ResourceUpdate(BaseModel):
@@ -587,14 +592,19 @@ class ResourceOut(BaseModel):
     color: str
     sort_order: int
     is_active: bool
+    kind: str
 
 
 @app.get("/resources", response_model=List[ResourceOut])
-def list_resources(section: Optional[str] = None, current_user: User = Depends(require_active_subscription)):
+def list_resources(
+    section: Optional[str] = None, kind: Optional[str] = None, current_user: User = Depends(require_active_subscription)
+):
     db = SessionLocal()
     query = db.query(Resource).filter(Resource.tenant_id == current_user.tenant_id, Resource.is_active == True)
     if section:
         query = query.filter(Resource.section == section)
+    if kind:
+        query = query.filter(Resource.kind == kind)
     items = query.order_by(Resource.sort_order).all()
     db.close()
     return items
@@ -602,6 +612,8 @@ def list_resources(section: Optional[str] = None, current_user: User = Depends(r
 
 @app.post("/resources", response_model=ResourceOut)
 def create_resource(data: ResourceCreate, current_user: User = Depends(require_owner)):
+    if data.kind not in VALID_RESOURCE_KINDS:
+        raise HTTPException(status_code=400, detail="Недопустимый тип ресурса")
     db = SessionLocal()
     item = Resource(
         tenant_id=current_user.tenant_id,
@@ -610,6 +622,7 @@ def create_resource(data: ResourceCreate, current_user: User = Depends(require_o
         color=data.color,
         sort_order=data.sort_order,
         is_active=True,
+        kind=data.kind,
     )
     db.add(item)
     db.commit()
@@ -648,6 +661,124 @@ def delete_resource(item_id: int, current_user: User = Depends(require_owner)):
         raise HTTPException(status_code=404, detail="Не найдено")
     # Soft delete — historical records may still reference this id via resource_id.
     item.is_active = False
+    db.commit()
+    db.close()
+    return "Удалено"
+
+
+class DayTime(BaseModel):
+    day: int
+    start_time: str
+    end_time: str
+
+
+class GroupScheduleCreate(BaseModel):
+    resource_id: int
+    room_id: int
+    day_times: List[DayTime]
+
+
+class GroupScheduleUpdate(BaseModel):
+    resource_id: Optional[int] = None
+    room_id: Optional[int] = None
+    day_times: Optional[List[DayTime]] = None
+
+
+def schedule_out(s: GroupSchedule) -> dict:
+    return {
+        "id": s.id,
+        "section": s.section,
+        "resource_id": s.resource_id,
+        "room_id": s.room_id,
+        "day_times": s.day_times,
+    }
+
+
+def validate_day_times(day_times: List[DayTime]):
+    if not day_times:
+        raise HTTPException(status_code=400, detail="Выберите хотя бы один день")
+    seen_days = set()
+    for dt in day_times:
+        if dt.day < 0 or dt.day > 6:
+            raise HTTPException(status_code=400, detail="Некорректный день недели")
+        if dt.day in seen_days:
+            raise HTTPException(status_code=400, detail="День недели указан дважды")
+        seen_days.add(dt.day)
+        if not dt.start_time or not dt.end_time or dt.start_time >= dt.end_time:
+            raise HTTPException(status_code=400, detail="Некорректное время")
+
+
+@app.get("/group_schedules")
+def list_group_schedules(section: str, current_user: User = Depends(require_active_subscription)):
+    db = SessionLocal()
+    items = (
+        db.query(GroupSchedule)
+        .filter(GroupSchedule.tenant_id == current_user.tenant_id, GroupSchedule.section == section)
+        .all()
+    )
+    result = [schedule_out(s) for s in items]
+    db.close()
+    return result
+
+
+@app.post("/group_schedules")
+def create_group_schedule(section: str, data: GroupScheduleCreate, current_user: User = Depends(require_owner)):
+    validate_day_times(data.day_times)
+    db = SessionLocal()
+    item = GroupSchedule(
+        tenant_id=current_user.tenant_id,
+        section=section,
+        resource_id=data.resource_id,
+        room_id=data.room_id,
+        day_times=[dt.dict() for dt in data.day_times],
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    result = schedule_out(item)
+    db.close()
+    return result
+
+
+@app.put("/group_schedules/{item_id}")
+def update_group_schedule(
+    item_id: int, section: str, data: GroupScheduleUpdate, current_user: User = Depends(require_owner)
+):
+    db = SessionLocal()
+    item = (
+        db.query(GroupSchedule)
+        .filter(GroupSchedule.id == item_id, GroupSchedule.tenant_id == current_user.tenant_id, GroupSchedule.section == section)
+        .first()
+    )
+    if item is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Не найдено")
+    if data.resource_id is not None:
+        item.resource_id = data.resource_id
+    if data.room_id is not None:
+        item.room_id = data.room_id
+    if data.day_times is not None:
+        validate_day_times(data.day_times)
+        item.day_times = [dt.dict() for dt in data.day_times]
+    db.commit()
+    db.refresh(item)
+    result = schedule_out(item)
+    db.close()
+    return result
+
+
+@app.delete("/group_schedules/{item_id}")
+def delete_group_schedule(item_id: int, section: str, current_user: User = Depends(require_owner)):
+    db = SessionLocal()
+    item = (
+        db.query(GroupSchedule)
+        .filter(GroupSchedule.id == item_id, GroupSchedule.tenant_id == current_user.tenant_id, GroupSchedule.section == section)
+        .first()
+    )
+    if item is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Не найдено")
+    db.delete(item)
     db.commit()
     db.close()
     return "Удалено"
@@ -837,6 +968,9 @@ def delete_section(section_id: int, current_user: User = Depends(require_owner))
         db.query(MembershipResource).filter(MembershipResource.membership_id.in_(membership_ids)).delete(synchronize_session=False)
         db.query(Membership).filter(Membership.id.in_(membership_ids)).delete(synchronize_session=False)
 
+    db.query(Client).filter(Client.tenant_id == current_user.tenant_id, Client.section == item.key).delete()
+    db.query(GroupSchedule).filter(GroupSchedule.tenant_id == current_user.tenant_id, GroupSchedule.section == item.key).delete()
+
     db.query(Record).filter(Record.tenant_id == current_user.tenant_id, Record.section == item.key).delete()
     db.delete(item)
     db.commit()
@@ -950,23 +1084,126 @@ VALID_ATTENDANCE_STATUSES = {"present", "absent"}
 VALID_TRIAL_STATUSES = {"scheduled", "came", "no_show", "bought", "thinking", "declined"}
 
 
-def find_or_create_client(db, tenant_id: int, full_name: str, phone: str, age, parent_name) -> Client:
-    client = db.query(Client).filter(Client.tenant_id == tenant_id, Client.phone == phone).first()
-    if client is None:
-        client = Client(tenant_id=tenant_id, full_name=full_name, phone=phone, age=age, parent_name=parent_name)
-        db.add(client)
-        db.flush()
-        return client
-    # Reusing an existing client (matched by phone) for another membership —
-    # only refresh fields that were actually supplied this time, otherwise a
-    # membership form left blank on age/parent_name would silently wipe out
-    # data already on file for the client.
-    client.full_name = full_name
-    if age is not None:
-        client.age = age
-    if parent_name is not None:
-        client.parent_name = parent_name
-    return client
+def client_out(c: Client) -> dict:
+    return {
+        "id": c.id,
+        "section": c.section,
+        "full_name": c.full_name,
+        "phone": c.phone,
+        "age": c.age,
+        "parent_name": c.parent_name,
+    }
+
+
+class ClientCreate(BaseModel):
+    full_name: str
+    phone: str
+    age: Optional[int] = None
+    parent_name: Optional[str] = None
+
+
+class ClientUpdate(BaseModel):
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    age: Optional[int] = None
+    parent_name: Optional[str] = None
+
+
+@app.get("/clients")
+def list_clients(section: str, current_user: User = Depends(require_active_subscription)):
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=False)
+    rows = (
+        db.query(Client)
+        .filter(Client.tenant_id == current_user.tenant_id, Client.section == section)
+        .order_by(Client.full_name)
+        .all()
+    )
+    result = [client_out(c) for c in rows]
+    db.close()
+    return result
+
+
+@app.post("/clients")
+def create_client(section: str, data: ClientCreate, current_user: User = Depends(require_active_subscription)):
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=True)
+    existing = (
+        db.query(Client)
+        .filter(Client.tenant_id == current_user.tenant_id, Client.section == section, Client.phone == data.phone)
+        .first()
+    )
+    if existing is not None:
+        db.close()
+        raise HTTPException(status_code=400, detail="Клиент с таким телефоном уже есть в этом разделе")
+    item = Client(
+        tenant_id=current_user.tenant_id,
+        section=section,
+        full_name=data.full_name,
+        phone=data.phone,
+        age=data.age,
+        parent_name=data.parent_name,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    result = client_out(item)
+    db.close()
+    return result
+
+
+@app.put("/clients/{client_id}")
+def update_client(
+    client_id: int, section: str, data: ClientUpdate, current_user: User = Depends(require_active_subscription)
+):
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=True)
+    item = (
+        db.query(Client)
+        .filter(Client.id == client_id, Client.tenant_id == current_user.tenant_id, Client.section == section)
+        .first()
+    )
+    if item is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Не найдено")
+    if data.full_name is not None:
+        item.full_name = data.full_name
+    if data.phone is not None:
+        item.phone = data.phone
+    if data.age is not None:
+        item.age = data.age
+    if data.parent_name is not None:
+        item.parent_name = data.parent_name
+    db.commit()
+    db.refresh(item)
+    result = client_out(item)
+    db.close()
+    return result
+
+
+@app.delete("/clients/{client_id}")
+def delete_client(client_id: int, section: str, current_user: User = Depends(require_active_subscription)):
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=True)
+    item = (
+        db.query(Client)
+        .filter(Client.id == client_id, Client.tenant_id == current_user.tenant_id, Client.section == section)
+        .first()
+    )
+    if item is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Не найдено")
+    membership_ids = [
+        m.id for m in db.query(Membership.id).filter(Membership.tenant_id == current_user.tenant_id, Membership.client_id == item.id).all()
+    ]
+    if membership_ids:
+        db.query(Attendance).filter(Attendance.membership_id.in_(membership_ids)).delete(synchronize_session=False)
+        db.query(MembershipResource).filter(MembershipResource.membership_id.in_(membership_ids)).delete(synchronize_session=False)
+        db.query(Membership).filter(Membership.id.in_(membership_ids)).delete(synchronize_session=False)
+    db.delete(item)
+    db.commit()
+    db.close()
+    return "Клиент удалён"
 
 
 def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
@@ -979,6 +1216,7 @@ def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
         "parent_name": c.parent_name,
         "section": m.section,
         "resource_ids": resource_ids,
+        "contract_number": m.contract_number,
         "payment_date": m.payment_date,
         "start_date": m.start_date,
         "end_date": m.end_date,
@@ -998,11 +1236,9 @@ def get_membership_resource_ids(db, membership_ids: List[int]) -> dict:
 
 
 class MembershipCreate(BaseModel):
-    full_name: str
-    phone: str
-    age: Optional[int] = None
-    parent_name: Optional[str] = None
+    client_id: int
     resource_ids: List[int]
+    contract_number: Optional[str] = None
     payment_date: Optional[str] = None
     start_date: str
     end_date: str
@@ -1011,11 +1247,8 @@ class MembershipCreate(BaseModel):
 
 
 class MembershipUpdate(BaseModel):
-    full_name: Optional[str] = None
-    phone: Optional[str] = None
-    age: Optional[int] = None
-    parent_name: Optional[str] = None
     resource_ids: Optional[List[int]] = None
+    contract_number: Optional[str] = None
     payment_date: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -1023,16 +1256,29 @@ class MembershipUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class MembershipRenew(BaseModel):
+    resource_ids: List[int]
+    contract_number: Optional[str] = None
+    payment_date: Optional[str] = None
+    start_date: str
+    end_date: str
+    price: Optional[int] = None
+
+
 @app.get("/memberships")
-def list_memberships(section: str, current_user: User = Depends(require_active_subscription)):
+def list_memberships(
+    section: str, client_id: Optional[int] = None, current_user: User = Depends(require_active_subscription)
+):
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=False)
-    rows = (
+    query = (
         db.query(Membership, Client)
         .join(Client, Client.id == Membership.client_id)
         .filter(Membership.tenant_id == current_user.tenant_id, Membership.section == section)
-        .all()
     )
+    if client_id is not None:
+        query = query.filter(Membership.client_id == client_id)
+    rows = query.all()
     resource_map = get_membership_resource_ids(db, [m.id for m, c in rows])
     result = [membership_out(m, c, resource_map[m.id]) for m, c in rows]
     db.close()
@@ -1047,13 +1293,19 @@ def create_membership(section: str, data: MembershipCreate, current_user: User =
         raise HTTPException(status_code=400, detail="Выберите хотя бы одну группу")
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=True)
-    client = find_or_create_client(
-        db, current_user.tenant_id, data.full_name, data.phone, data.age, data.parent_name
+    client = (
+        db.query(Client)
+        .filter(Client.id == data.client_id, Client.tenant_id == current_user.tenant_id, Client.section == section)
+        .first()
     )
+    if client is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Клиент не найден")
     item = Membership(
         tenant_id=current_user.tenant_id,
         client_id=client.id,
         section=section,
+        contract_number=data.contract_number,
         payment_date=data.payment_date,
         start_date=data.start_date,
         end_date=data.end_date,
@@ -1086,14 +1338,6 @@ def update_membership(
         db.close()
         raise HTTPException(status_code=404, detail="Не найдено")
     client = db.query(Client).filter(Client.id == item.client_id).first()
-    if data.full_name is not None:
-        client.full_name = data.full_name
-    if data.phone is not None:
-        client.phone = data.phone
-    if data.age is not None:
-        client.age = data.age
-    if data.parent_name is not None:
-        client.parent_name = data.parent_name
     if data.resource_ids is not None:
         if not data.resource_ids:
             db.close()
@@ -1101,6 +1345,8 @@ def update_membership(
         db.query(MembershipResource).filter(MembershipResource.membership_id == item.id).delete()
         for resource_id in data.resource_ids:
             db.add(MembershipResource(membership_id=item.id, resource_id=resource_id))
+    if data.contract_number is not None:
+        item.contract_number = data.contract_number
     if data.payment_date is not None:
         item.payment_date = data.payment_date
     if data.start_date is not None:
@@ -1142,6 +1388,50 @@ def delete_membership(item_id: int, section: str, current_user: User = Depends(r
     return "Абонемент удалён"
 
 
+@app.post("/memberships/{item_id}/renew")
+def renew_membership(
+    item_id: int, section: str, data: MembershipRenew, current_user: User = Depends(require_active_subscription)
+):
+    if not data.resource_ids:
+        raise HTTPException(status_code=400, detail="Выберите хотя бы одну группу")
+    db = SessionLocal()
+    assert_section_access(db, current_user, section, write=True)
+    old_item = (
+        db.query(Membership)
+        .filter(Membership.id == item_id, Membership.tenant_id == current_user.tenant_id, Membership.section == section)
+        .first()
+    )
+    if old_item is None:
+        db.close()
+        raise HTTPException(status_code=404, detail="Не найдено")
+    client = db.query(Client).filter(Client.id == old_item.client_id).first()
+    # Renewal keeps the old membership around (status flips to "expired") instead of
+    # overwriting its dates in place, so past Касса revenue stays attributed to the
+    # day it was actually paid and attendance history stays attached to its own period.
+    old_item.status = "expired"
+    new_item = Membership(
+        tenant_id=current_user.tenant_id,
+        client_id=old_item.client_id,
+        section=section,
+        contract_number=data.contract_number if data.contract_number is not None else old_item.contract_number,
+        payment_date=data.payment_date,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        price=data.price,
+        status="active",
+    )
+    db.add(new_item)
+    db.flush()
+    for resource_id in data.resource_ids:
+        db.add(MembershipResource(membership_id=new_item.id, resource_id=resource_id))
+    db.commit()
+    db.refresh(new_item)
+    resource_ids = get_membership_resource_ids(db, [new_item.id])[new_item.id]
+    result = membership_out(new_item, client, resource_ids)
+    db.close()
+    return result
+
+
 @app.get("/attendance")
 def list_attendance(
     section: str,
@@ -1165,6 +1455,7 @@ def list_attendance(
         .filter(
             Membership.tenant_id == current_user.tenant_id,
             Membership.section == section,
+            Membership.status != "expired",
             MembershipResource.resource_id == resource_id,
         )
         .all()

@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
 
@@ -86,6 +87,7 @@ class Resource(Base):
     color = Column(String, nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
+    kind = Column(String, nullable=False, default="group")  # "group" | "room" (club-template rooms)
 
 
 class TrainerResource(Base):
@@ -133,6 +135,7 @@ class Client(Base):
 
     id = Column(Integer, primary_key=True, nullable=False)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    section = Column(String, nullable=False, index=True)  # club-template section key this client's card belongs to
     full_name = Column(String, nullable=False)
     phone = Column(String, nullable=False)
     age = Column(Integer, nullable=True)
@@ -152,6 +155,20 @@ class Membership(Base):
     end_date = Column(DateTime, nullable=False)
     price = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="active")  # "active" | "expired" | "frozen"
+    contract_number = Column(String, nullable=True)
+
+
+class GroupSchedule(Base):
+    __tablename__ = "group_schedules"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    section = Column(String, nullable=False, index=True)  # club-template section key
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False, index=True)  # группа
+    room_id = Column(Integer, ForeignKey("resources.id"), nullable=False, index=True)  # зал (kind="room")
+    # [{"day": 0-6 (0=Пн..6=Вс), "start_time": "HH:MM", "end_time": "HH:MM"}, ...] —
+    # each day of the week can have its own time range (e.g. Пн 16:00, Ср 18:00).
+    day_times = Column(JSONB, nullable=False)
 
 
 class MembershipResource(Base):
