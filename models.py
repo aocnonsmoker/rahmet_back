@@ -141,6 +141,7 @@ class Client(Base):
     age = Column(Integer, nullable=True)
     parent_name = Column(String, nullable=True)  # guardian name, for minor clients
     contract_number = Column(String, nullable=True)
+    contract_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 

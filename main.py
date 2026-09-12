@@ -1093,6 +1093,7 @@ def client_out(c: Client) -> dict:
         "age": c.age,
         "parent_name": c.parent_name,
         "contract_number": c.contract_number,
+        "contract_date": c.contract_date,
     }
 
 
@@ -1102,6 +1103,7 @@ class ClientCreate(BaseModel):
     age: Optional[int] = None
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
+    contract_date: Optional[str] = None
 
 
 class ClientUpdate(BaseModel):
@@ -1110,6 +1112,7 @@ class ClientUpdate(BaseModel):
     age: Optional[int] = None
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
+    contract_date: Optional[str] = None
 
 
 @app.get("/clients")
@@ -1131,14 +1134,19 @@ def list_clients(section: str, current_user: User = Depends(require_active_subsc
 def create_client(section: str, data: ClientCreate, current_user: User = Depends(require_active_subscription)):
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=True)
-    existing = (
-        db.query(Client)
-        .filter(Client.tenant_id == current_user.tenant_id, Client.section == section, Client.phone == data.phone)
-        .first()
-    )
-    if existing is not None:
-        db.close()
-        raise HTTPException(status_code=400, detail="Клиент с таким телефоном уже есть в этом разделе")
+    if data.contract_number:
+        existing = (
+            db.query(Client)
+            .filter(
+                Client.tenant_id == current_user.tenant_id,
+                Client.section == section,
+                Client.contract_number == data.contract_number,
+            )
+            .first()
+        )
+        if existing is not None:
+            db.close()
+            raise HTTPException(status_code=400, detail="Клиент с таким номером договора уже есть в этом разделе")
     item = Client(
         tenant_id=current_user.tenant_id,
         section=section,
@@ -1147,6 +1155,7 @@ def create_client(section: str, data: ClientCreate, current_user: User = Depends
         age=data.age,
         parent_name=data.parent_name,
         contract_number=data.contract_number,
+        contract_date=data.contract_date or None,
     )
     db.add(item)
     db.commit()
@@ -1179,7 +1188,23 @@ def update_client(
     if data.parent_name is not None:
         item.parent_name = data.parent_name
     if data.contract_number is not None:
+        if data.contract_number and data.contract_number != item.contract_number:
+            existing = (
+                db.query(Client)
+                .filter(
+                    Client.tenant_id == current_user.tenant_id,
+                    Client.section == section,
+                    Client.contract_number == data.contract_number,
+                    Client.id != item.id,
+                )
+                .first()
+            )
+            if existing is not None:
+                db.close()
+                raise HTTPException(status_code=400, detail="Клиент с таким номером договора уже есть в этом разделе")
         item.contract_number = data.contract_number
+    if data.contract_date is not None:
+        item.contract_date = data.contract_date or None
     db.commit()
     db.refresh(item)
     result = client_out(item)
@@ -1456,6 +1481,8 @@ def list_attendance(
             Membership.section == section,
             Membership.status != "expired",
             MembershipResource.resource_id == resource_id,
+            Membership.start_date < range_end,
+            Membership.end_date >= range_start,
         )
         .all()
     )
