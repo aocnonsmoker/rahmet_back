@@ -1092,6 +1092,7 @@ def client_out(c: Client) -> dict:
         "phone": c.phone,
         "age": c.age,
         "parent_name": c.parent_name,
+        "contract_number": c.contract_number,
     }
 
 
@@ -1100,6 +1101,7 @@ class ClientCreate(BaseModel):
     phone: str
     age: Optional[int] = None
     parent_name: Optional[str] = None
+    contract_number: Optional[str] = None
 
 
 class ClientUpdate(BaseModel):
@@ -1107,6 +1109,7 @@ class ClientUpdate(BaseModel):
     phone: Optional[str] = None
     age: Optional[int] = None
     parent_name: Optional[str] = None
+    contract_number: Optional[str] = None
 
 
 @app.get("/clients")
@@ -1143,6 +1146,7 @@ def create_client(section: str, data: ClientCreate, current_user: User = Depends
         phone=data.phone,
         age=data.age,
         parent_name=data.parent_name,
+        contract_number=data.contract_number,
     )
     db.add(item)
     db.commit()
@@ -1174,6 +1178,8 @@ def update_client(
         item.age = data.age
     if data.parent_name is not None:
         item.parent_name = data.parent_name
+    if data.contract_number is not None:
+        item.contract_number = data.contract_number
     db.commit()
     db.refresh(item)
     result = client_out(item)
@@ -1214,9 +1220,9 @@ def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
         "phone": c.phone,
         "age": c.age,
         "parent_name": c.parent_name,
+        "contract_number": c.contract_number,
         "section": m.section,
         "resource_ids": resource_ids,
-        "contract_number": m.contract_number,
         "payment_date": m.payment_date,
         "start_date": m.start_date,
         "end_date": m.end_date,
@@ -1238,7 +1244,6 @@ def get_membership_resource_ids(db, membership_ids: List[int]) -> dict:
 class MembershipCreate(BaseModel):
     client_id: int
     resource_ids: List[int]
-    contract_number: Optional[str] = None
     payment_date: Optional[str] = None
     start_date: str
     end_date: str
@@ -1248,7 +1253,6 @@ class MembershipCreate(BaseModel):
 
 class MembershipUpdate(BaseModel):
     resource_ids: Optional[List[int]] = None
-    contract_number: Optional[str] = None
     payment_date: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -1258,7 +1262,6 @@ class MembershipUpdate(BaseModel):
 
 class MembershipRenew(BaseModel):
     resource_ids: List[int]
-    contract_number: Optional[str] = None
     payment_date: Optional[str] = None
     start_date: str
     end_date: str
@@ -1305,7 +1308,6 @@ def create_membership(section: str, data: MembershipCreate, current_user: User =
         tenant_id=current_user.tenant_id,
         client_id=client.id,
         section=section,
-        contract_number=data.contract_number,
         payment_date=data.payment_date,
         start_date=data.start_date,
         end_date=data.end_date,
@@ -1345,8 +1347,6 @@ def update_membership(
         db.query(MembershipResource).filter(MembershipResource.membership_id == item.id).delete()
         for resource_id in data.resource_ids:
             db.add(MembershipResource(membership_id=item.id, resource_id=resource_id))
-    if data.contract_number is not None:
-        item.contract_number = data.contract_number
     if data.payment_date is not None:
         item.payment_date = data.payment_date
     if data.start_date is not None:
@@ -1413,7 +1413,6 @@ def renew_membership(
         tenant_id=current_user.tenant_id,
         client_id=old_item.client_id,
         section=section,
-        contract_number=data.contract_number if data.contract_number is not None else old_item.contract_number,
         payment_date=data.payment_date,
         start_date=data.start_date,
         end_date=data.end_date,

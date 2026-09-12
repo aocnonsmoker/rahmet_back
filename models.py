@@ -140,6 +140,7 @@ class Client(Base):
     phone = Column(String, nullable=False)
     age = Column(Integer, nullable=True)
     parent_name = Column(String, nullable=True)  # guardian name, for minor clients
+    contract_number = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -155,7 +156,6 @@ class Membership(Base):
     end_date = Column(DateTime, nullable=False)
     price = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="active")  # "active" | "expired" | "frozen"
-    contract_number = Column(String, nullable=True)
 
 
 class GroupSchedule(Base):
