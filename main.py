@@ -1,3 +1,4 @@
+import calendar
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -452,12 +453,14 @@ class TrainerCreate(BaseModel):
     section: str
     full_name: str
     phone: Optional[str] = None
+    photo_url: Optional[str] = None
     resource_ids: List[int] = []
 
 
 class TrainerUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    photo_url: Optional[str] = None
     is_active: Optional[bool] = None
     resource_ids: Optional[List[int]] = None
 
@@ -467,6 +470,7 @@ class TrainerOut(BaseModel):
     section: str
     full_name: str
     phone: Optional[str] = None
+    photo_url: Optional[str] = None
     is_active: bool
     resource_ids: List[int]
 
@@ -477,6 +481,7 @@ def trainer_out(t: Trainer, resource_ids: List[int]) -> dict:
         "section": t.section,
         "full_name": t.full_name,
         "phone": t.phone,
+        "photo_url": t.photo_url,
         "is_active": t.is_active,
         "resource_ids": resource_ids,
     }
@@ -513,6 +518,7 @@ def create_trainer(data: TrainerCreate, current_user: User = Depends(require_own
         section=data.section,
         full_name=data.full_name,
         phone=data.phone,
+        photo_url=data.photo_url,
         is_active=True,
     )
     db.add(item)
@@ -537,6 +543,8 @@ def update_trainer(item_id: int, data: TrainerUpdate, current_user: User = Depen
         item.full_name = data.full_name
     if data.phone is not None:
         item.phone = data.phone
+    if data.photo_url is not None:
+        item.photo_url = data.photo_url
     if data.is_active is not None:
         item.is_active = data.is_active
     if data.resource_ids is not None:
@@ -1001,14 +1009,20 @@ class RecordUpdate(BaseModel):
 
 
 @app.get("/records")
-def list_records(section: str, current_user: User = Depends(require_active_subscription)):
+def list_records(
+    section: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    current_user: User = Depends(require_active_subscription),
+):
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=False)
-    items = (
-        db.query(Record)
-        .filter(Record.tenant_id == current_user.tenant_id, Record.section == section)
-        .all()
-    )
+    query = db.query(Record).filter(Record.tenant_id == current_user.tenant_id, Record.section == section)
+    if start is not None:
+        query = query.filter(Record.start >= datetime.fromisoformat(start.replace(" ", "T")))
+    if end is not None:
+        query = query.filter(Record.start < datetime.fromisoformat(end.replace(" ", "T")))
+    items = query.all()
     db.close()
     return items
 
@@ -1080,7 +1094,20 @@ def delete_record(item_id: int, section: str, current_user: User = Depends(requi
 # ============================== Club module (клиенты/абонементы, посещаемость, пробные) ==============================
 
 VALID_MEMBERSHIP_STATUSES = {"active", "expired", "frozen"}
-VALID_ATTENDANCE_STATUSES = {"present", "absent"}
+# "trainer_cancelled" marks a day the trainer cancelled (own color in the journal);
+# "makeup" marks an unrelated day the client attended to compensate for a cancelled
+# one — it's a plain visual tag, not linked to a specific cancelled date.
+VALID_ATTENDANCE_STATUSES = {"present", "absent", "trainer_cancelled", "makeup"}
+
+
+def auto_membership_end_date(start_date) -> datetime:
+    """A month out from start_date, minus a day — e.g. Sep 16 -> Oct 15."""
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date[:10], "%Y-%m-%d")
+    year = start_date.year + (1 if start_date.month == 12 else 0)
+    month = 1 if start_date.month == 12 else start_date.month + 1
+    day = min(start_date.day, calendar.monthrange(year, month)[1])
+    return start_date.replace(year=year, month=month, day=day) - timedelta(days=1)
 VALID_TRIAL_STATUSES = {"scheduled", "came", "no_show", "bought", "thinking", "declined"}
 
 
@@ -1253,6 +1280,7 @@ def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
         "end_date": m.end_date,
         "price": m.price,
         "status": m.status,
+        "frozen_at": m.frozen_at,
     }
 
 
@@ -1319,6 +1347,10 @@ def create_membership(section: str, data: MembershipCreate, current_user: User =
         raise HTTPException(status_code=400, detail="Недопустимый статус абонемента")
     if not data.resource_ids:
         raise HTTPException(status_code=400, detail="Выберите хотя бы одну группу")
+    if current_user.role != "owner":
+        expected_end = auto_membership_end_date(data.start_date)
+        if datetime.strptime(data.end_date[:10], "%Y-%m-%d").date() != expected_end.date():
+            raise HTTPException(status_code=403, detail="Дату окончания абонемента может менять только владелец")
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=True)
     client = (
@@ -1376,7 +1408,20 @@ def update_membership(
         item.payment_date = data.payment_date
     if data.start_date is not None:
         item.start_date = data.start_date
+    # Captured before any reassignment below — used as the shift base if this
+    # request also unfreezes the membership.
+    original_end_date = item.end_date
     if data.end_date is not None:
+        if current_user.role != "owner":
+            # Не сравниваем с прежней датой напрямую: смена "с" легитимно
+            # пересчитывает "по" на фронте и должна проходить у сотрудника тоже —
+            # запрещаем только отклонение от формулы "месяц минус день".
+            effective_start = data.start_date if data.start_date is not None else item.start_date
+            expected_end = auto_membership_end_date(effective_start)
+            new_end = datetime.strptime(data.end_date[:10], "%Y-%m-%d")
+            if new_end.date() != expected_end.date():
+                db.close()
+                raise HTTPException(status_code=403, detail="Дату окончания абонемента может менять только владелец")
         item.end_date = data.end_date
     if data.price is not None:
         item.price = data.price
@@ -1384,6 +1429,19 @@ def update_membership(
         if data.status not in VALID_MEMBERSHIP_STATUSES:
             db.close()
             raise HTTPException(status_code=400, detail="Недопустимый статус абонемента")
+        if data.status == "frozen" and item.status != "frozen":
+            item.frozen_at = datetime.utcnow()
+        elif item.status == "frozen" and data.status != "frozen":
+            # Push the end date back by however many days the membership sat
+            # frozen, so the client doesn't lose paid-for days.
+            if item.frozen_at is not None:
+                frozen_days = (datetime.utcnow().date() - item.frozen_at.date()).days
+                if frozen_days > 0:
+                    base_end = original_end_date
+                    if isinstance(base_end, str):
+                        base_end = datetime.strptime(base_end[:10], "%Y-%m-%d")
+                    item.end_date = base_end + timedelta(days=frozen_days)
+            item.frozen_at = None
         item.status = data.status
     db.commit()
     db.refresh(item)

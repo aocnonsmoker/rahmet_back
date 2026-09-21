@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, UniqueConstraint, func
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
@@ -74,6 +74,7 @@ class Trainer(Base):
     section = Column(String, nullable=False)  # club-template section key
     full_name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
+    photo_url = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -157,6 +158,7 @@ class Membership(Base):
     end_date = Column(DateTime, nullable=False)
     price = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="active")  # "active" | "expired" | "frozen"
+    frozen_at = Column(DateTime, nullable=True)  # when the current freeze started; used to shift end_date on unfreeze
 
 
 class GroupSchedule(Base):
