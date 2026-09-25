@@ -1,8 +1,9 @@
 import calendar
+import json
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
@@ -11,6 +12,7 @@ from auth import (
     assert_section_access,
     create_access_token,
     get_current_user,
+    get_user_from_token_unsafe,
     get_user_sections,
     hash_password,
     require_active_subscription,
@@ -20,6 +22,7 @@ from auth import (
 )
 from models import (
     Attendance,
+    AuditLog,
     Client,
     GroupSchedule,
     Membership,
@@ -82,6 +85,188 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
     allow_headers=["*"],  # Allow all headers
 )
+
+
+# ============================== Audit log ==============================
+# A generic middleware instead of instrumenting each endpoint individually —
+# guarantees every current and future create/update/delete is captured
+# without anyone having to remember to add a log call to a new route.
+
+AUDIT_ACTION_BY_METHOD = {"POST": "create", "PUT": "update", "DELETE": "delete"}
+AUDIT_SKIP_PREFIXES = ("/auth", "/admin", "/audit_logs")
+AUDIT_SUMMARY_FIELDS = ["full_name", "label", "username", "phone", "status"]
+# A DELETE's response body never carries the deleted row's own data, so the
+# usual "pull a label from the response JSON" trick can't work for it — this
+# maps a path's first segment to the model/field to look up *before* the
+# delete runs, for entities that carry a natural label on their own row.
+AUDIT_DELETE_SUMMARY_SOURCES = {
+    "trainers": (Trainer, "full_name"),
+    "resources": (Resource, "label"),
+    "clients": (Client, "full_name"),
+    "trial_lessons": (TrialLesson, "full_name"),
+    "users": (User, "username"),
+    "sections": (Section, "label"),
+}
+
+
+def _lookup_delete_summary(path: str):
+    segments = [s for s in path.split("/") if s]
+    if len(segments) < 2 or not segments[-1].isdigit():
+        return None
+    model_field = AUDIT_DELETE_SUMMARY_SOURCES.get(segments[0])
+    if not model_field:
+        return None
+    model, field = model_field
+    db = SessionLocal()
+    try:
+        row = db.query(model).filter(model.id == int(segments[-1])).first()
+        return getattr(row, field, None) if row else None
+    finally:
+        db.close()
+
+
+def _audit_summary(data):
+    if isinstance(data, dict):
+        for field in AUDIT_SUMMARY_FIELDS:
+            value = data.get(field)
+            if value:
+                return str(value)[:200]
+    return None
+
+
+ATTENDANCE_STATUS_LABELS = {
+    "present": "был",
+    "absent": "пропуск",
+    "trainer_cancelled": "отменил тренер",
+    "makeup": "отработка",
+}
+
+
+def _attendance_summary(request: Request, request_data, response_data):
+    # Attendance marks don't carry the client's name themselves (just
+    # membership_id) — a plain field pull would only ever show the raw
+    # status, which is meaningless without knowing whose it is.
+    membership_id = None
+    status = None
+    for data in (request_data, response_data):
+        if isinstance(data, dict):
+            membership_id = membership_id or data.get("membership_id")
+            status = status or data.get("status")
+    if membership_id is None:
+        membership_id = request.query_params.get("membership_id")
+    if not membership_id:
+        return None
+
+    db = SessionLocal()
+    try:
+        membership = db.query(Membership).filter(Membership.id == int(membership_id)).first()
+        if membership is None:
+            return None
+        client = db.query(Client).filter(Client.id == membership.client_id).first()
+        if client is None:
+            return None
+        status_label = ATTENDANCE_STATUS_LABELS.get(status, status)
+        return f"{client.full_name} — {status_label}" if status_label else client.full_name
+    finally:
+        db.close()
+
+
+def _write_audit_log(request: Request, body_bytes: bytes, resp_bytes: bytes, pre_delete_summary=None) -> None:
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return
+    token = auth_header[7:]
+
+    db = SessionLocal()
+    try:
+        user = get_user_from_token_unsafe(token, db)
+        if user is None:
+            return
+
+        segments = [s for s in request.url.path.split("/") if s]
+        if not segments:
+            return
+        entity_type = segments[0]
+        entity_id = None
+        action = AUDIT_ACTION_BY_METHOD[request.method]
+        if segments[-1].isdigit():
+            entity_id = int(segments[-1])
+        elif len(segments) >= 3 and segments[-2].isdigit():
+            # e.g. /memberships/12/renew — id is the second-to-last segment,
+            # the trailing word is a more specific action than the HTTP verb.
+            entity_id = int(segments[-2])
+            action = segments[-1]
+
+        request_data = response_data = None
+        try:
+            request_data = json.loads(body_bytes) if body_bytes else None
+        except (ValueError, UnicodeDecodeError):
+            pass
+        try:
+            response_data = json.loads(resp_bytes) if resp_bytes else None
+        except (ValueError, UnicodeDecodeError):
+            pass
+
+        if entity_id is None and isinstance(response_data, dict):
+            entity_id = response_data.get("id")
+
+        if entity_type == "attendance":
+            summary = _attendance_summary(request, request_data, response_data)
+        else:
+            summary = _audit_summary(response_data) or _audit_summary(request_data) or pre_delete_summary
+
+        db.add(AuditLog(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            username=user.username,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            section=request.query_params.get("section"),
+            summary=summary,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+@app.middleware("http")
+async def audit_log_middleware(request: Request, call_next):
+    if request.method not in AUDIT_ACTION_BY_METHOD or request.url.path.startswith(AUDIT_SKIP_PREFIXES):
+        return await call_next(request)
+
+    body_bytes = await request.body()
+
+    async def receive():
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    request._receive = receive  # replay the body we just consumed for the real route handler
+
+    pre_delete_summary = None
+    if request.method == "DELETE":
+        try:
+            pre_delete_summary = _lookup_delete_summary(request.url.path)
+        except Exception:
+            pass
+
+    response = await call_next(request)
+
+    resp_bytes = b""
+    async for chunk in response.body_iterator:
+        resp_bytes += chunk
+
+    async def new_body_iterator():
+        yield resp_bytes
+
+    response.body_iterator = new_body_iterator()
+
+    if 200 <= response.status_code < 300:
+        try:
+            _write_audit_log(request, body_bytes, resp_bytes, pre_delete_summary)
+        except Exception:
+            pass  # logging must never break the actual request
+
+    return response
 
 
 @app.get("/")
@@ -1281,6 +1466,7 @@ def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
         "price": m.price,
         "status": m.status,
         "frozen_at": m.frozen_at,
+        "paid": m.paid,
     }
 
 
@@ -1302,6 +1488,7 @@ class MembershipCreate(BaseModel):
     end_date: str
     price: Optional[int] = None
     status: str = "active"
+    paid: bool = True
 
 
 class MembershipUpdate(BaseModel):
@@ -1311,6 +1498,7 @@ class MembershipUpdate(BaseModel):
     end_date: Optional[str] = None
     price: Optional[int] = None
     status: Optional[str] = None
+    paid: Optional[bool] = None
 
 
 class MembershipRenew(BaseModel):
@@ -1319,6 +1507,7 @@ class MembershipRenew(BaseModel):
     start_date: str
     end_date: str
     price: Optional[int] = None
+    paid: bool = True
 
 
 @app.get("/memberships")
@@ -1370,6 +1559,7 @@ def create_membership(section: str, data: MembershipCreate, current_user: User =
         end_date=data.end_date,
         price=data.price,
         status=data.status,
+        paid=data.paid,
     )
     db.add(item)
     db.flush()
@@ -1443,6 +1633,8 @@ def update_membership(
                     item.end_date = base_end + timedelta(days=frozen_days)
             item.frozen_at = None
         item.status = data.status
+    if data.paid is not None:
+        item.paid = data.paid
     db.commit()
     db.refresh(item)
     resource_ids = get_membership_resource_ids(db, [item.id])[item.id]
@@ -1501,6 +1693,7 @@ def renew_membership(
         end_date=data.end_date,
         price=data.price,
         status="active",
+        paid=data.paid,
     )
     db.add(new_item)
     db.flush()
@@ -1749,3 +1942,138 @@ def delete_trial_lesson(item_id: int, section: str, current_user: User = Depends
     db.commit()
     db.close()
     return "Запись удалена"
+
+
+# ============================== Журнал событий ==============================
+
+class AuditLogOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    action: str
+    entity_type: str
+    entity_id: Optional[int] = None
+    section: Optional[str] = None
+    section_label: Optional[str] = None
+    summary: Optional[str] = None
+    created_at: datetime
+
+
+@app.get("/audit_logs", response_model=List[AuditLogOut])
+def list_audit_logs(
+    limit: int = 100,
+    offset: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    action: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    section: Optional[str] = None,
+    current_user: User = Depends(require_owner),
+):
+    db = SessionLocal()
+    query = db.query(AuditLog).filter(AuditLog.tenant_id == current_user.tenant_id)
+    if start_date:
+        query = query.filter(AuditLog.created_at >= datetime.fromisoformat(start_date))
+    if end_date:
+        query = query.filter(AuditLog.created_at < datetime.fromisoformat(end_date) + timedelta(days=1))
+    if action:
+        query = query.filter(AuditLog.action == action)
+    if entity_type:
+        query = query.filter(AuditLog.entity_type == entity_type)
+    if section:
+        query = query.filter(AuditLog.section == section)
+    limit = min(max(limit, 1), 500)
+    rows = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    sections = {
+        s.key: s.label
+        for s in db.query(Section).filter(Section.tenant_id == current_user.tenant_id).all()
+    }
+    result = [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "username": r.username,
+            "action": r.action,
+            "entity_type": r.entity_type,
+            "entity_id": r.entity_id,
+            "section": r.section,
+            "section_label": sections.get(r.section) if r.section else None,
+            "summary": r.summary,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+    db.close()
+    return result
+
+
+# ============================== Уведомления по абонементам ==============================
+# Aggregated across every club-template section the user can see — the sidebar bell is a
+# global element, not scoped to whichever section happens to be open right now.
+
+MEMBERSHIP_WARNING_LABELS = {"debt": "Долг", "frozen": "Заморожен", "expiring": "Скоро закончится"}
+MEMBERSHIP_WARNING_ORDER = {"debt": 0, "frozen": 1, "expiring": 2}
+
+
+@app.get("/membership_warnings")
+def list_membership_warnings(current_user: User = Depends(require_active_subscription)):
+    db = SessionLocal()
+    sections = (
+        db.query(Section)
+        .filter(Section.tenant_id == current_user.tenant_id, Section.template == "club", Section.enabled == True)
+        .all()
+    )
+    if current_user.role != "owner":
+        allowed_keys = set(get_user_sections(db, current_user))
+        sections = [s for s in sections if s.key in allowed_keys]
+    if not sections:
+        db.close()
+        return []
+
+    section_keys = [s.key for s in sections]
+    section_labels = {s.key: s.label for s in sections}
+
+    rows = (
+        db.query(Membership, Client)
+        .join(Client, Client.id == Membership.client_id)
+        .filter(
+            Membership.tenant_id == current_user.tenant_id,
+            Membership.section.in_(section_keys),
+            Membership.status.in_(["active", "frozen"]),
+        )
+        .all()
+    )
+    resource_map = get_membership_resource_ids(db, [m.id for m, c in rows])
+    resource_labels = {
+        r.id: r.label for r in db.query(Resource).filter(Resource.tenant_id == current_user.tenant_id).all()
+    }
+
+    today = datetime.utcnow().date()
+    result = []
+    for m, c in rows:
+        days_left = (m.end_date.date() - today).days
+        if not m.paid:
+            status = "debt"
+        elif m.status == "frozen":
+            status = "frozen"
+        elif 0 <= days_left <= 3:
+            status = "expiring"
+        else:
+            continue
+        result.append({
+            "membership_id": m.id,
+            "client_id": c.id,
+            "client_name": c.full_name,
+            "section_key": m.section,
+            "section_label": section_labels.get(m.section, m.section),
+            "group_labels": ", ".join(resource_labels.get(rid, "—") for rid in resource_map.get(m.id, [])),
+            "status": status,
+            "status_label": MEMBERSHIP_WARNING_LABELS[status],
+            "end_date": m.end_date,
+            "days_left": days_left,
+        })
+
+    result.sort(key=lambda w: (MEMBERSHIP_WARNING_ORDER[w["status"]], w["days_left"]))
+    db.close()
+    return result

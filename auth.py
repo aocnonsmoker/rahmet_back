@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 import bcrypt
 from dotenv import load_dotenv
@@ -57,6 +57,18 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if user is None or not user.is_active:
         raise credentials_error
     return user
+
+
+def get_user_from_token_unsafe(token: str, db: Session) -> Optional[User]:
+    """Best-effort decode for the audit-log middleware — never raises, just
+    returns None on anything wrong with the token (used purely to attribute a
+    log entry, so it must never be able to break the actual request)."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, TypeError, ValueError):
+        return None
+    return db.query(User).filter(User.id == user_id).first()
 
 
 def require_active_subscription(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:

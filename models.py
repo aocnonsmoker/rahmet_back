@@ -159,6 +159,7 @@ class Membership(Base):
     price = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="active")  # "active" | "expired" | "frozen"
     frozen_at = Column(DateTime, nullable=True)  # when the current freeze started; used to shift end_date on unfreeze
+    paid = Column(Boolean, nullable=False, default=True)  # false = renewed/created without payment yet -> shows as "Долг"
 
 
 class GroupSchedule(Base):
@@ -208,3 +209,18 @@ class TrialLesson(Base):
     status = Column(String, nullable=False, default="scheduled")
     # "scheduled" | "came" | "no_show" | "bought" | "thinking" | "declined"
     created_at = Column(DateTime, server_default=func.now())
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username = Column(String, nullable=True)  # denormalized — survives the user being renamed/removed
+    action = Column(String, nullable=False)  # "create" | "update" | "delete" | "renew"
+    entity_type = Column(String, nullable=False, index=True)  # e.g. "clients", "memberships", "trainers"
+    entity_id = Column(Integer, nullable=True)
+    section = Column(String, nullable=True, index=True)
+    summary = Column(String, nullable=True)  # human-readable label, e.g. the client's name
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
