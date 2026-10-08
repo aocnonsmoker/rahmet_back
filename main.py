@@ -1306,6 +1306,7 @@ def client_out(c: Client) -> dict:
         "parent_name": c.parent_name,
         "contract_number": c.contract_number,
         "contract_date": c.contract_date,
+        "note": c.note,
     }
 
 
@@ -1316,6 +1317,7 @@ class ClientCreate(BaseModel):
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
     contract_date: Optional[str] = None
+    note: Optional[str] = None
 
 
 class ClientUpdate(BaseModel):
@@ -1325,6 +1327,7 @@ class ClientUpdate(BaseModel):
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
     contract_date: Optional[str] = None
+    note: Optional[str] = None
 
 
 @app.get("/clients")
@@ -1368,6 +1371,7 @@ def create_client(section: str, data: ClientCreate, current_user: User = Depends
         parent_name=data.parent_name,
         contract_number=data.contract_number,
         contract_date=data.contract_date or None,
+        note=(data.note or "").strip() or None,
     )
     db.add(item)
     db.commit()
@@ -1417,6 +1421,8 @@ def update_client(
         item.contract_number = data.contract_number
     if data.contract_date is not None:
         item.contract_date = data.contract_date or None
+    if data.note is not None:
+        item.note = data.note.strip() or None
     db.commit()
     db.refresh(item)
     result = client_out(item)

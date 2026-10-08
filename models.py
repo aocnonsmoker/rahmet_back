@@ -143,6 +143,7 @@ class Client(Base):
     parent_name = Column(String, nullable=True)  # guardian name, for minor clients
     contract_number = Column(String, nullable=True)
     contract_date = Column(DateTime, nullable=True)
+    note = Column(Text, nullable=True)  # free-form staff note, e.g. a sibling discount
     created_at = Column(DateTime, server_default=func.now())
 
 
