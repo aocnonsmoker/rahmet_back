@@ -1,6 +1,6 @@
 import calendar
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -224,6 +224,9 @@ def _write_audit_log(request: Request, body_bytes: bytes, resp_bytes: bytes, pre
             entity_id=entity_id,
             section=request.query_params.get("section"),
             summary=summary,
+            # Stored as naive UTC regardless of the DB server's timezone setting;
+            # /audit_logs tags it as UTC so browsers show their local time.
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         ))
         db.commit()
     finally:
@@ -1296,13 +1299,35 @@ def auto_membership_end_date(start_date) -> datetime:
 VALID_TRIAL_STATUSES = {"scheduled", "came", "no_show", "bought", "thinking", "declined"}
 
 
+def client_age(c: Client) -> Optional[int]:
+    """Age from the birth date when known, else the legacy manually typed age."""
+    if c.birth_date is None:
+        return c.age
+    today = date.today()
+    had_birthday = (today.month, today.day) >= (c.birth_date.month, c.birth_date.day)
+    return today.year - c.birth_date.year - (0 if had_birthday else 1)
+
+
+def parse_birth_date(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        parsed = date.fromisoformat(value[:10])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверная дата рождения")
+    if parsed > date.today():
+        raise HTTPException(status_code=400, detail="Дата рождения не может быть в будущем")
+    return parsed
+
+
 def client_out(c: Client) -> dict:
     return {
         "id": c.id,
         "section": c.section,
         "full_name": c.full_name,
         "phone": c.phone,
-        "age": c.age,
+        "age": client_age(c),
+        "birth_date": c.birth_date.isoformat() if c.birth_date else None,
         "parent_name": c.parent_name,
         "contract_number": c.contract_number,
         "contract_date": c.contract_date,
@@ -1314,6 +1339,7 @@ class ClientCreate(BaseModel):
     full_name: str
     phone: str
     age: Optional[int] = None
+    birth_date: Optional[str] = None
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
     contract_date: Optional[str] = None
@@ -1324,6 +1350,7 @@ class ClientUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     age: Optional[int] = None
+    birth_date: Optional[str] = None  # "" clears it
     parent_name: Optional[str] = None
     contract_number: Optional[str] = None
     contract_date: Optional[str] = None
@@ -1347,6 +1374,7 @@ def list_clients(section: str, current_user: User = Depends(require_active_subsc
 
 @app.post("/clients")
 def create_client(section: str, data: ClientCreate, current_user: User = Depends(require_active_subscription)):
+    birth_date = parse_birth_date(data.birth_date)
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=True)
     if data.contract_number:
@@ -1368,6 +1396,7 @@ def create_client(section: str, data: ClientCreate, current_user: User = Depends
         full_name=data.full_name,
         phone=data.phone,
         age=data.age,
+        birth_date=birth_date,
         parent_name=data.parent_name,
         contract_number=data.contract_number,
         contract_date=data.contract_date or None,
@@ -1385,6 +1414,7 @@ def create_client(section: str, data: ClientCreate, current_user: User = Depends
 def update_client(
     client_id: int, section: str, data: ClientUpdate, current_user: User = Depends(require_active_subscription)
 ):
+    birth_date = parse_birth_date(data.birth_date)
     db = SessionLocal()
     assert_section_access(db, current_user, section, write=True)
     item = (
@@ -1401,6 +1431,8 @@ def update_client(
         item.phone = data.phone
     if data.age is not None:
         item.age = data.age
+    if data.birth_date is not None:
+        item.birth_date = birth_date
     if data.parent_name is not None:
         item.parent_name = data.parent_name
     if data.contract_number is not None:
@@ -1461,7 +1493,7 @@ def membership_out(m: Membership, c: Client, resource_ids: List[int]) -> dict:
         "client_id": c.id,
         "full_name": c.full_name,
         "phone": c.phone,
-        "age": c.age,
+        "age": client_age(c),
         "parent_name": c.parent_name,
         "contract_number": c.contract_number,
         "section": m.section,
@@ -1974,14 +2006,18 @@ def list_audit_logs(
     action: Optional[str] = None,
     entity_type: Optional[str] = None,
     section: Optional[str] = None,
+    # Browser's offset from UTC (e.g. 300 for Kazakhstan), so start/end dates
+    # mean the user's local calendar days rather than UTC days.
+    utc_offset_minutes: int = 0,
     current_user: User = Depends(require_owner),
 ):
     db = SessionLocal()
     query = db.query(AuditLog).filter(AuditLog.tenant_id == current_user.tenant_id)
+    local_to_utc = timedelta(minutes=utc_offset_minutes)
     if start_date:
-        query = query.filter(AuditLog.created_at >= datetime.fromisoformat(start_date))
+        query = query.filter(AuditLog.created_at >= datetime.fromisoformat(start_date) - local_to_utc)
     if end_date:
-        query = query.filter(AuditLog.created_at < datetime.fromisoformat(end_date) + timedelta(days=1))
+        query = query.filter(AuditLog.created_at < datetime.fromisoformat(end_date) + timedelta(days=1) - local_to_utc)
     if action:
         query = query.filter(AuditLog.action == action)
     if entity_type:
@@ -2006,7 +2042,7 @@ def list_audit_logs(
             "section": r.section,
             "section_label": sections.get(r.section) if r.section else None,
             "summary": r.summary,
-            "created_at": r.created_at,
+            "created_at": r.created_at.replace(tzinfo=timezone.utc),
         }
         for r in rows
     ]

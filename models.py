@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint, func
+from sqlalchemy import Column, Integer, String, Text, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
@@ -139,7 +139,8 @@ class Client(Base):
     section = Column(String, nullable=False, index=True)  # club-template section key this client's card belongs to
     full_name = Column(String, nullable=False)
     phone = Column(String, nullable=False)
-    age = Column(Integer, nullable=True)
+    age = Column(Integer, nullable=True)  # legacy manual age; birth_date takes precedence when set
+    birth_date = Column(Date, nullable=True)
     parent_name = Column(String, nullable=True)  # guardian name, for minor clients
     contract_number = Column(String, nullable=True)
     contract_date = Column(DateTime, nullable=True)
